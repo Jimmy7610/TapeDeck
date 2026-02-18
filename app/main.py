@@ -249,37 +249,55 @@ class TapeDeckApp(QObject):
                 self.ui.set_status("Save failed", error=True)
 
     def handle_test_url(self, url):
-        from .utils import probe_stream_url
+        from .utils import probe_stream_url, ffprobe_stream_check
         import threading
         
-        print(f"DEBUG: Testing URL: {url}")
+        print(f"DEBUG: Testing URL: {url} (Concurrent Triple-Probe)")
         if self.test_dialog:
             self.test_dialog.lbl_test_result.setText("TESTING...")
             self.test_dialog.lbl_test_result.setStyleSheet("color: #ffa000;")
 
-        def worker():
+        # A watchdog state to prevent multiple reports
+        self._test_result_reported = False
+
+        def http_worker():
             try:
-                # Stage 1: Fast HTTP Probe
                 success, msg = probe_stream_url(url)
+                if success and not self._test_result_reported:
+                    QTimer.singleShot(0, lambda: self._report_test_result(True, msg))
+            except: pass
+
+        def vlc_worker():
+            try:
+                success, msg = self._vlc_probe_fallback(url)
+                if success and not self._test_result_reported:
+                    QTimer.singleShot(0, lambda: self._report_test_result(True, msg))
+            except: pass
+
+        def ffprobe_worker():
+            try:
+                success, msg = ffprobe_stream_check(url)
+                if success and not self._test_result_reported:
+                    QTimer.singleShot(0, lambda: self._report_test_result(True, msg))
+            except: pass
                 
-                # Stage 2: VLC Fallback (if HTTP probe yields NET ERROR or specific failures)
-                if not success:
-                    print(f"DEBUG: HTTP probe failed ({msg}), trying VLC fallback...")
-                    success, msg = self._vlc_probe_fallback(url)
-            except Exception as e:
-                print(f"DEBUG: Test worker crashed: {e}")
-                success, msg = False, "CRASHED"
-                
-            # Jump back to UI thread to report results
-            QTimer.singleShot(0, lambda: self._report_test_result(success, msg))
-            
-        threading.Thread(target=worker, daemon=True).start()
+        def watchdog_timeout():
+            if not self._test_result_reported:
+                print(f"DEBUG: Concurrent probe TIMEOUT for {url}")
+                self._report_test_result(False, "TIMEOUT")
+
+        # 12-second hard timeout for the entire probe process
+        QTimer.singleShot(12000, watchdog_timeout)
+        
+        # Start all probes independently as daemon threads
+        threading.Thread(target=http_worker, daemon=True).start()
+        threading.Thread(target=vlc_worker, daemon=True).start()
+        threading.Thread(target=ffprobe_worker, daemon=True).start()
 
     def _vlc_probe_fallback(self, url):
         """Headless VLC probe to match real-world playability."""
         import vlc
         import time
-        from .state import PlayerState
         
         try:
             instance = self.player.instance
@@ -297,6 +315,8 @@ class TapeDeckApp(QObject):
             # Poll for up to 5 seconds
             result = (False, "TIMEOUT")
             for _ in range(50):
+                if self._test_result_reported: # Abort if watchdog already triggered
+                    break
                 time.sleep(0.1)
                 st = probe_player.get_state().value
                 # Map VLC state to PlayerState logic (Playing=3)
@@ -315,8 +335,10 @@ class TapeDeckApp(QObject):
             return False, "PROBE ERR"
 
     def _report_test_result(self, success, msg):
-        if self.test_dialog:
-            self.test_dialog.set_test_result(success, msg)
+        if not self._test_result_reported:
+            self._test_result_reported = True
+            if self.test_dialog:
+                self.test_dialog.set_test_result(success, msg)
 
     def handle_rec(self, checked):
         # 1. Truth Sync Guard: If we are already in the target state, do nothing

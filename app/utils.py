@@ -49,42 +49,68 @@ def get_unique_base_name(directory, name_template, extension="aac"):
 def probe_stream_url(url, timeout=5):
     """
     Robustly test if a stream URL is reachable and returning data.
-    Uses urllib to follow redirects and read the first few KB.
-    Returns (success, message).
+    Uses Stage 0 (Socket check) followed by Stage 1 (urllib).
+    Forces IPv4 to avoid stalls on broken IPv6 environments.
     """
     import urllib.request
     from urllib.error import URLError, HTTPError
+    from urllib.parse import urlparse
     import socket
     import time
     import ssl
 
-    # A1: SSL Context (Ignore cert validation for radio streams)
+    print(f"DEBUG: PROBE START: {url}")
+
+    # STAGE 0: Fast Socket Check (Force IPv4)
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+        
+        if not host:
+            return False, "INVALID URL"
+            
+        print(f"DEBUG: Stage 0: Checking {host}:{port} (IPv4)")
+        # Resolve to IPv4 to avoid broken IPv6 stalls
+        addr_info = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+        ipv4_addr = addr_info[0][4][0]
+        
+        with socket.create_connection((ipv4_addr, port), timeout=3.0):
+            print(f"DEBUG: Stage 0: Success (Connect OK: {ipv4_addr})")
+    except socket.gaierror:
+        print(f"DEBUG: Stage 0: DNS FAIL")
+        return False, "DNS ERROR"
+    except (socket.timeout, ConnectionRefusedError):
+        print(f"DEBUG: Stage 0: CONN FAIL/TIMEOUT")
+        return False, "TIMEOUT"
+    except Exception as e:
+        print(f"DEBUG: Stage 0 Warning: {e}")
+
+    # STAGE 1: HTTP Probe
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
 
     headers = {"User-Agent": "TapeDeck/1.0.0"}
     try:
-        # A2: Disable proxies explicitly to avoid hangs on system config
         proxy_handler = urllib.request.ProxyHandler({})
         opener = urllib.request.build_opener(proxy_handler)
-        
         req = urllib.request.Request(url, headers=headers)
         
-        # B3: Non-blocking attempt to open
+        print(f"DEBUG: Stage 1: Opening {url}")
+        # Note: opener.open uses global timeout
         with opener.open(req, timeout=timeout) as response:
             if response.status >= 400:
-                print(f"DEBUG: probe_stream_url HTTP {response.status} for {url}")
+                print(f"DEBUG: Stage 1: HTTP {response.status}")
                 return False, f"HTTP {response.status}"
             
-            # Read a small chunk (1KB) to confirm data is flowing
-            # Radio streams can be slow, we use a slightly longer read timeout here
-            chunk = response.read(1024)
-            if chunk:
-                return True, "WORKS"
-            
-            # Tiny retry if zero bytes (streaming buffers)
-            time.sleep(1.0)
+            # Set a strict timeout on the underlying socket for the read operation
+            try:
+                response.fp.raw._sock.settimeout(3.0)
+            except:
+                pass
+                
+            print(f"DEBUG: Stage 1: Reading chunk...")
             chunk = response.read(1024)
             if chunk:
                 return True, "WORKS"
@@ -92,18 +118,46 @@ def probe_stream_url(url, timeout=5):
             return False, "NO DATA"
 
     except HTTPError as e:
-        print(f"DEBUG: HTTPError for {url}: {e.code}")
         return False, f"HTTP {e.code}"
     except URLError as e:
-        # Handles DNS failures, connection refused, etc.
-        reason = str(e.reason)
-        print(f"DEBUG: URLError for {url}: {reason}")
-        if "getaddrinfo failed" in reason:
-            return False, "DNS ERROR"
         return False, "NET ERROR"
     except socket.timeout:
-        print(f"DEBUG: Timeout for {url}")
         return False, "TIMEOUT"
     except Exception as e:
-        print(f"DEBUG: Exception for {url}: {str(e)}")
+        return False, "ERROR"
+
+def ffprobe_stream_check(url, timeout=10):
+    """
+    Use ffprobe to verify the stream. Highly reliable for streaming protocols.
+    """
+    import subprocess
+    import shutil
+    
+    if not shutil.which("ffprobe"):
+        return False, "NO FFPROBE"
+        
+    print(f"DEBUG: STAGE 3: ffprobe check for {url}")
+    cmd = [
+        "ffprobe", 
+        "-v", "quiet", 
+        "-print_format", "json",
+        "-show_streams",
+        "-timeout", str(timeout * 1000000), # ffprobe uses microseconds
+        url
+    ]
+    
+    try:
+        # Use a shell-less call for speed and safety
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode == 0:
+            import json
+            data = json.loads(result.stdout)
+            if data.get("streams"):
+                return True, "WORKS"
+        return False, "FAIL / NO STREAM"
+    except subprocess.TimeoutExpired:
+        print(f"DEBUG: ffprobe TIMEOUT for {url}")
+        return False, "TIMEOUT"
+    except Exception as e:
+        print(f"DEBUG: ffprobe ERROR: {e}")
         return False, "ERROR"

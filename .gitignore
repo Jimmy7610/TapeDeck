@@ -1,0 +1,21 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# App runtime data
+recordings/
+test_results/
+settings.json
+*.log
+
+# External binaries
+bin/ffmpeg.exe
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store

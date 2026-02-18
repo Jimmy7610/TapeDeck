@@ -249,27 +249,62 @@ class TapeDeckApp(QObject):
                 self.ui.set_status("Save failed", error=True)
 
     def handle_test_url(self, url):
-        print(f"DEBUG: Testing URL: {url}")
-        # Use a temporary player instance or just use existing one muted?
-        # Better: use existing one muted to avoid libvlc conflicts
-        was_playing = self.player.is_playing()
-        if was_playing:
-            self.player.stop()
-            
-        self.player.play(url)
-        self.player.player.audio_set_mute(True)
+        from .utils import probe_stream_url
+        import threading
         
-        def check_test():
-            state = self.player.get_state()
-            success = (state == 3) # Playing
-            self.test_dialog.set_test_result(success)
-            self.player.stop()
-            self.player.player.audio_set_mute(False)
-            # Restore if was playing (optional - maybe better to stay stopped after test)
-            if was_playing and self.ui.btn_on_air.isChecked():
-                 self.handle_on_air(True)
-                 
-        QTimer.singleShot(3000, check_test)
+        print(f"DEBUG: Testing URL: {url}")
+        if self.test_dialog:
+            self.test_dialog.lbl_test_result.setText("TESTING...")
+            self.test_dialog.lbl_test_result.setStyleSheet("color: #ffa000;")
+
+        def worker():
+            # Stage 1: Fast HTTP Probe
+            success, msg = probe_stream_url(url)
+            
+            # Stage 2: VLC Fallback (if HTTP probe yields NET ERROR or specific failures)
+            if not success:
+                print(f"DEBUG: HTTP probe failed ({msg}), trying VLC fallback...")
+                success, msg = self._vlc_probe_fallback(url)
+                
+            # Jump back to UI thread to report results
+            QTimer.singleShot(0, lambda: self._report_test_result(success, msg))
+            
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _vlc_probe_fallback(self, url):
+        """Headless VLC probe to match real-world playability."""
+        from .player import RadioPlayer
+        from .state import PlayerState
+        import time
+        
+        try:
+            # We use a dedicated local player for probing to avoid interfering with current playback
+            probe_player = RadioPlayer()
+            if not probe_player.is_initialized():
+                return False, "VLC INIT ERR"
+            
+            probe_player.play(url)
+            probe_player.player.audio_set_mute(True)
+            
+            # Poll for up to 4 seconds
+            for _ in range(40):
+                time.sleep(0.1)
+                st = probe_player.get_state()
+                if st == PlayerState.PLAYING:
+                    probe_player.stop()
+                    return True, "WORKS"
+                if st == PlayerState.ERROR:
+                    break
+                    
+            probe_player.stop()
+            return False, "TIMEOUT / ERR"
+        except Exception as e:
+            print(f"DEBUG: VLC probe fallback crashed: {e}")
+            return False, "PROBE ERR"
+
+    def _report_test_result(self, success, msg):
+        if self.test_dialog:
+            self.test_dialog.set_test_result(success, msg)
 
     def handle_rec(self, checked):
         # 1. Truth Sync Guard: If we are already in the target state, do nothing

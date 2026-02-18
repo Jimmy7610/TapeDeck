@@ -909,12 +909,12 @@ class ChannelManagerDialog(QDialog):
         self.lbl_test_result.setStyleSheet("color: #aaa;")
         self.test_url_requested.emit(url)
 
-    def set_test_result(self, success):
+    def set_test_result(self, success, msg=""):
         if success:
-            self.lbl_test_result.setText("OK")
+            self.lbl_test_result.setText(msg if msg else "WORKS")
             self.lbl_test_result.setStyleSheet("color: #00ff00;")
         else:
-            self.lbl_test_result.setText("FAILED")
+            self.lbl_test_result.setText(msg if msg else "FAILED")
             self.lbl_test_result.setStyleSheet("color: #ff1744;")
 
 

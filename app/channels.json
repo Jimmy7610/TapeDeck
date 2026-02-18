@@ -9,6 +9,10 @@
     {
       "name": "NRJ",
       "url": "http://live-bauerse-fm.sharp-stream.com/nrj_instreamtest_se_aacp"
+    },
+    {
+      "name": "P1",
+      "url": "https://live1.sr.se/p1-aac-128"
     }
   ]
 }

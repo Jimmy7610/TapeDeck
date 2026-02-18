@@ -45,3 +45,54 @@ def get_unique_base_name(directory, name_template, extension="aac"):
         
         counter += 1
         candidate = f"{name_template}_{counter:03d}"
+
+def probe_stream_url(url, timeout=5):
+    """
+    Robustly test if a stream URL is reachable and returning data.
+    Uses urllib to follow redirects and read the first few KB.
+    Returns (success, message).
+    """
+    import urllib.request
+    from urllib.error import URLError, HTTPError
+    import socket
+    import time
+    import ssl
+
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    headers = {"User-Agent": "TapeDeck/1.0.0"}
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        # urllib follows redirects by default
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as response:
+            if response.status >= 400:
+                print(f"DEBUG: probe_stream_url {url} failed with status {response.status}")
+                return False, f"HTTP {response.status}"
+            
+            # Read a small chunk (1KB) to confirm data is flowing
+            chunk = response.read(1024)
+            if len(chunk) > 0:
+                return True, "WORKS"
+            
+            # Tiny retry if zero bytes
+            time.sleep(1.0)
+            chunk = response.read(1024)
+            if len(chunk) > 0:
+                return True, "WORKS"
+                
+            return False, "NO DATA"
+
+    except HTTPError as e:
+        print(f"DEBUG: HTTPError for {url}: {e.code}")
+        return False, f"HTTP {e.code}"
+    except URLError as e:
+        print(f"DEBUG: URLError for {url}: {e.reason}")
+        return False, f"NET ERROR"
+    except socket.timeout:
+        print(f"DEBUG: Timeout for {url}")
+        return False, "TIMEOUT"
+    except Exception as e:
+        print(f"DEBUG: Exception for {url}: {str(e)}")
+        return False, "ERROR"

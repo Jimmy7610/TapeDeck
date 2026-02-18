@@ -58,28 +58,35 @@ def probe_stream_url(url, timeout=5):
     import time
     import ssl
 
+    # A1: SSL Context (Ignore cert validation for radio streams)
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
 
     headers = {"User-Agent": "TapeDeck/1.0.0"}
     try:
+        # A2: Disable proxies explicitly to avoid hangs on system config
+        proxy_handler = urllib.request.ProxyHandler({})
+        opener = urllib.request.build_opener(proxy_handler)
+        
         req = urllib.request.Request(url, headers=headers)
-        # urllib follows redirects by default
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as response:
+        
+        # B3: Non-blocking attempt to open
+        with opener.open(req, timeout=timeout) as response:
             if response.status >= 400:
-                print(f"DEBUG: probe_stream_url {url} failed with status {response.status}")
+                print(f"DEBUG: probe_stream_url HTTP {response.status} for {url}")
                 return False, f"HTTP {response.status}"
             
             # Read a small chunk (1KB) to confirm data is flowing
+            # Radio streams can be slow, we use a slightly longer read timeout here
             chunk = response.read(1024)
-            if len(chunk) > 0:
+            if chunk:
                 return True, "WORKS"
             
-            # Tiny retry if zero bytes
+            # Tiny retry if zero bytes (streaming buffers)
             time.sleep(1.0)
             chunk = response.read(1024)
-            if len(chunk) > 0:
+            if chunk:
                 return True, "WORKS"
                 
             return False, "NO DATA"
@@ -88,8 +95,12 @@ def probe_stream_url(url, timeout=5):
         print(f"DEBUG: HTTPError for {url}: {e.code}")
         return False, f"HTTP {e.code}"
     except URLError as e:
-        print(f"DEBUG: URLError for {url}: {e.reason}")
-        return False, f"NET ERROR"
+        # Handles DNS failures, connection refused, etc.
+        reason = str(e.reason)
+        print(f"DEBUG: URLError for {url}: {reason}")
+        if "getaddrinfo failed" in reason:
+            return False, "DNS ERROR"
+        return False, "NET ERROR"
     except socket.timeout:
         print(f"DEBUG: Timeout for {url}")
         return False, "TIMEOUT"

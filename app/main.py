@@ -258,13 +258,17 @@ class TapeDeckApp(QObject):
             self.test_dialog.lbl_test_result.setStyleSheet("color: #ffa000;")
 
         def worker():
-            # Stage 1: Fast HTTP Probe
-            success, msg = probe_stream_url(url)
-            
-            # Stage 2: VLC Fallback (if HTTP probe yields NET ERROR or specific failures)
-            if not success:
-                print(f"DEBUG: HTTP probe failed ({msg}), trying VLC fallback...")
-                success, msg = self._vlc_probe_fallback(url)
+            try:
+                # Stage 1: Fast HTTP Probe
+                success, msg = probe_stream_url(url)
+                
+                # Stage 2: VLC Fallback (if HTTP probe yields NET ERROR or specific failures)
+                if not success:
+                    print(f"DEBUG: HTTP probe failed ({msg}), trying VLC fallback...")
+                    success, msg = self._vlc_probe_fallback(url)
+            except Exception as e:
+                print(f"DEBUG: Test worker crashed: {e}")
+                success, msg = False, "CRASHED"
                 
             # Jump back to UI thread to report results
             QTimer.singleShot(0, lambda: self._report_test_result(success, msg))
@@ -273,31 +277,39 @@ class TapeDeckApp(QObject):
 
     def _vlc_probe_fallback(self, url):
         """Headless VLC probe to match real-world playability."""
-        from .player import RadioPlayer
-        from .state import PlayerState
+        import vlc
         import time
+        from .state import PlayerState
         
         try:
-            # We use a dedicated local player for probing to avoid interfering with current playback
-            probe_player = RadioPlayer()
-            if not probe_player.is_initialized():
+            instance = self.player.instance
+            if not instance:
                 return False, "VLC INIT ERR"
             
-            probe_player.play(url)
-            probe_player.player.audio_set_mute(True)
+            # Create a temporary player using the shared instance
+            probe_player = instance.media_player_new()
+            media = instance.media_new(url)
+            probe_player.set_media(media)
             
-            # Poll for up to 4 seconds
-            for _ in range(40):
+            probe_player.audio_set_mute(True)
+            probe_player.play()
+            
+            # Poll for up to 5 seconds
+            result = (False, "TIMEOUT")
+            for _ in range(50):
                 time.sleep(0.1)
-                st = probe_player.get_state()
-                if st == PlayerState.PLAYING:
-                    probe_player.stop()
-                    return True, "WORKS"
-                if st == PlayerState.ERROR:
+                st = probe_player.get_state().value
+                # Map VLC state to PlayerState logic (Playing=3)
+                if st == 3: # Playing
+                    result = (True, "WORKS")
+                    break
+                if st == 7: # Error
+                    result = (False, "VLC ERROR")
                     break
                     
             probe_player.stop()
-            return False, "TIMEOUT / ERR"
+            probe_player.release()
+            return result
         except Exception as e:
             print(f"DEBUG: VLC probe fallback crashed: {e}")
             return False, "PROBE ERR"

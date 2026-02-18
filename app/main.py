@@ -10,6 +10,7 @@ from .player import RadioPlayer
 from .recorder import TapeRecorder
 from .logger import TapeLogger
 from .utils import get_timestamp_str, get_hms_str, format_duration
+from .state import PlayerState, RecorderState
 
 class TapeDeckApp(QObject):
     def __init__(self):
@@ -79,6 +80,12 @@ class TapeDeckApp(QObject):
         self.status_timer.timeout.connect(self.poll_vlc_status)
         self.status_timer.start(500)
         
+        # Phase 3: UX Hardening - Check ffmpeg
+        if not self.recorder.is_available():
+            print("CRITICAL: FFmpeg not found. REC functionality will be disabled.")
+            self.ui.btn_rec.setEnabled(False)
+            self.ui.set_status("FFmpeg missing: REC disabled", error=True)
+
         # B2: Debounce for confirmed loss
         self.lost_candidate_timer = QTimer(self)
         self.lost_candidate_timer.setSingleShot(True)
@@ -129,13 +136,16 @@ class TapeDeckApp(QObject):
         self._start_playback()
 
     def poll_vlc_status(self):
-        # Update Record UI
+        # 1. Recorder Truth-Sync & Watchdog
+        recorder_state = self.recorder.state
         is_rec_running = self.recorder.is_recording
+        
         if is_rec_running:
             alive, size, tail = self.recorder.check_status()
             if not alive:
-                # A2: Watchdog detected post-health-check crash
-                print(f"DEBUG: Recording watchdog triggered! Process dead. Tail: {tail}")
+                print(f"DEBUG: Watchdog: FFmpeg crash detected! State: {recorder_state.name}. Tail: {tail}")
+                if self.logger:
+                    self.logger.log_event("CRASH", f"FFmpeg exited unexpectedly. Tail: {tail[:100]}", rec_seconds=self.recorder.get_elapsed_seconds())
                 self._handle_rec_fail(self.settings.get("prefer_stream_copy", True))
             else:
                 secs = self.recorder.get_elapsed_seconds()
@@ -143,17 +153,18 @@ class TapeDeckApp(QObject):
         else:
             self.ui.update_rec_timer("00:00:00")
             
-        # 3.3 UI state must reflect actual recording state (Guard)
+        # REC Truth Guard: ensure UI button matches recorder state machine
         if self.ui.btn_rec.isChecked() != is_rec_running:
-            print(f"DEBUG: Syncing UI REC state to {is_rec_running}")
-            self.ui.set_rec_state(is_rec_running)
+            # We allow a brief desync only during STARTING or STOPPED states
+            if recorder_state not in [RecorderState.STARTING, RecorderState.STOPPING]:
+                print(f"DEBUG: Syncing UI REC state to {is_rec_running} (Backend: {recorder_state.name})")
+                self.ui.set_rec_state(is_rec_running)
 
-
-        state = self.player.get_state()
-        # VLC state: 0=NothingSpecial, 1=Opening, 2=Buffering, 3=Playing, 4=Paused, 5=Stopped, 6=Ended, 7=Error
+        # 2. Player ON AIR Sync
+        player_state = self.player.get_state()
         
         if not self.on_air_intent:
-            if state in [1, 2, 3]:
+            if player_state in [PlayerState.OPENING, PlayerState.BUFFERING, PlayerState.PLAYING]:
                 self.player.stop()
             self.ui.set_status("Idle")
             self.ui.set_on_air(False)
@@ -163,49 +174,36 @@ class TapeDeckApp(QObject):
         # User intent is ON
         self.ui.set_on_air(True)
 
-        if state == 3: # Playing
+        if player_state == PlayerState.PLAYING:
             self.ui.set_status("Playing")
             self.reconnect_retry_count = 0
             self.lost_candidate_timer.stop()
             
-            # C3: Re-enforce audio settings (libvlc resets these when playback starts)
+            # Re-enforce audio settings
             if self.player.player.audio_get_mute():
-                print("DEBUG: Re-unmuting active stream...")
                 self.player.player.audio_set_mute(False)
             
             cur_vol = self.player.player.audio_get_volume()
             if cur_vol != 80 and cur_vol != -1:
-                print(f"DEBUG: Correcting volume to 80 (was {cur_vol})")
                 self.player.player.audio_set_volume(80)
 
             if self.reconnect_timer.isActive():
-                print("DEBUG: Reconnect success")
                 self.reconnect_timer.stop()
         
-        # D4: Debug window logging
-        if self.debug_window_active:
-            name = self.player.get_state_name(state)
-            vol = self.player.player.audio_get_volume()
-            mute = self.player.player.audio_get_mute()
-            print(f"[{get_timestamp_str()}] DEBUG WINDOW: State={name}({state}), Vol={vol}, Mute={bool(mute)}")
-        
-        if state == 1: # Opening
+        if player_state == PlayerState.OPENING:
             self.ui.set_status("Opening...")
             self.lost_candidate_timer.stop()
-        elif state == 2: # Buffering
+        elif player_state == PlayerState.BUFFERING:
             self.ui.set_status("Buffering...")
             self.lost_candidate_timer.stop()
-        elif state == 4: # Paused
-            self.ui.set_status("Playing") # Map to OK
+        elif player_state == PlayerState.PAUSED:
+            self.ui.set_status("Playing")
             self.lost_candidate_timer.stop()
-        elif state in [0, 5, 6, 7]: # NothingSpecial/Stopped/Ended/Error
-            # B2: Debounce loss
+        elif player_state in [PlayerState.NOTHING_SPECIAL, PlayerState.STOPPED, PlayerState.ENDED, PlayerState.ERROR]:
             if not self.lost_candidate_timer.isActive() and not self.reconnect_timer.isActive():
-                print(f"DEBUG: Potential stream loss (state={state}). Debouncing 1200ms...")
-                self.ui.set_status("Connecting...", error=False) # Keep blue/green status while debouncing
+                self.ui.set_status("Connecting...", error=False)
                 self.lost_candidate_timer.start(1200)
             elif self.reconnect_timer.isActive():
-                # Already in reconnect mode, show loss
                 self.ui.set_status("STREAM LOST", error=True)
 
 
@@ -213,9 +211,9 @@ class TapeDeckApp(QObject):
         if not self.on_air_intent:
             return
             
-        state = self.player.get_state()
-        if state in [5, 6, 7]:
-            print(f"DEBUG: Stream loss confirmed (state={state}).")
+        player_state = self.player.get_state()
+        if player_state in [PlayerState.STOPPED, PlayerState.ENDED, PlayerState.ERROR]:
+            print(f"DEBUG: Stream loss confirmed (state={player_state.name}).")
             self.ui.set_status("STREAM LOST", error=True)
             
             if not self.reconnect_timer.isActive():
@@ -274,6 +272,10 @@ class TapeDeckApp(QObject):
         QTimer.singleShot(3000, check_test)
 
     def handle_rec(self, checked):
+        # 1. Truth Sync Guard: If we are already in the target state, do nothing
+        if checked == self.recorder.is_recording:
+            return
+
         if checked:
             if not self.ui.btn_on_air.isChecked():
                 self.ui.set_rec_state(False)
@@ -285,24 +287,25 @@ class TapeDeckApp(QObject):
                 self.ui.set_status("Must be ON AIR to record", error=True)
                 return
             
+            # Instant UI toggle (Optimistic)
+            self.ui.set_rec_state(True)
             self._start_recording_attempt(prefer_copy=self.settings.get("prefer_stream_copy", True))
         else:
-            # Stop Recording
-            if self.recorder.is_recording or self.recorder.process:
-                track_info = f"{self.current_artist} — {self.current_title}"
-                if self.logger:
-                    self.logger.log_event("END", track_info, rec_seconds=self.recorder.get_elapsed_seconds(), suffix="recording stopped")
-                
-                success = self.recorder.stop_recording()
-                if not success:
-                    self.ui.set_status("FFMPEG ERROR: stop failed", error=True)
-                else:
-                    if self.player.is_playing():
-                        self.ui.set_status("Playing")
-                    else:
-                        self.ui.set_status("Idle")
-            
+            # Atomic stop
             self.ui.set_rec_state(False)
+            self._stop_recording_sync()
+
+    def _stop_recording_sync(self):
+        if self.recorder.state in [RecorderState.RECORDING, RecorderState.STARTING]:
+            track_info = f"{self.current_artist} — {self.current_title}"
+            if self.logger:
+                self.logger.log_event("END", track_info, rec_seconds=self.recorder.get_elapsed_seconds(), suffix="stopped by user")
+            
+            success = self.recorder.stop_recording()
+            if not success:
+                self.ui.set_status("FFMPEG ERROR: stop failed", error=True)
+            else:
+                self.ui.set_status("Playing" if self.player.is_playing() else "Idle")
 
     def _start_recording_attempt(self, prefer_copy=True):
         from pathlib import Path

@@ -8,6 +8,9 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, Signal, QSize
 from PySide6.QtGui import QFont, QPalette, QColor, QFontDatabase
 
+from .utils import format_duration
+from .version import VERSION
+
 class TapeDeckUI(QMainWindow):
     # Signals for orchestration
     on_air_clicked = Signal(bool)
@@ -235,6 +238,11 @@ class TapeDeckUI(QMainWindow):
         
         self.lbl_latency = QLabel("LATENCY: --")
         self.lbl_latency.setObjectName("latencyLabel")
+
+        # Version label in footer
+        self.lbl_version = QLabel(f"v{VERSION}")
+        self.lbl_version.setObjectName("versionLabel")
+        self.lbl_version.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         
         self.lbl_status = QLabel("STATUS: IDLE")
         self.lbl_status.setObjectName("statusLabel")
@@ -354,8 +362,9 @@ class TapeDeckUI(QMainWindow):
         self.bottom_bar_layout.addWidget(self.btn_open_folder)
         self.bottom_bar_layout.addWidget(self.btn_restart)
         self.bottom_bar_layout.addWidget(self.btn_power)
-        self.bottom_bar_layout.addWidget(self.btn_manage_channels)
-        self.bottom_bar_layout.addStretch()
+        self.bottom_bar.layout().addWidget(self.btn_manage_channels)
+        self.bottom_bar.layout().addStretch()
+        self.bottom_bar.layout().addWidget(self.lbl_version)
         self.bottom_bar_layout.addWidget(self.lbl_latency)
         self.bottom_bar_layout.addWidget(self.lbl_status)
         root_layout.addWidget(self.bottom_bar, 0)  # Fixed height

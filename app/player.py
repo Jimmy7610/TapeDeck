@@ -2,12 +2,13 @@ import vlc
 import time
 import platform
 import os
+from .state import PlayerState
 
 class RadioPlayer:
     def __init__(self):
         self._init_vlc()
         self.current_url = None
-        self._last_polled_state = 0 # NothingSpecial
+        self._last_polled_state = PlayerState.STOPPED
 
     def _init_vlc(self):
         arch = platform.architecture()[0]
@@ -56,7 +57,6 @@ class RadioPlayer:
             self.player = self.instance.media_player_new()
             
             vlc_ver = vlc.libvlc_get_version().decode('utf-8')
-            print(f"DEBUG: VLC Version: {vlc_ver}")
             print(f"DEBUG: VLC Version: {vlc_ver}")
             print(f"DEBUG: VLC Instance args: {vlc_args}")
             
@@ -160,38 +160,24 @@ class RadioPlayer:
         return artist, title
 
     def get_state(self):
-        """Returns the current state of the player as an integer and logs transitions."""
+        """Returns the current PlayerState."""
         if not self.player:
-            return 6 # Ended/Stopped
+            return PlayerState.ERROR
         
         try:
-            from .utils import get_timestamp_str
-            state_val = self.player.get_state().value
+            vlc_state = self.player.get_state().value
+            # Map VLC state integer to PlayerState enum
+            # VLC states: 0=NothingSpecial, 1=Opening, 2=Buffering, 3=Playing, 4=Paused, 5=Stopped, 6=Ended, 7=Error
+            state = PlayerState(vlc_state)
             
-            # Log transition if changed
-            if state_val != self._last_polled_state:
-                old_name = self.get_state_name(self._last_polled_state)
-                new_name = self.get_state_name(state_val)
-                print(f"[{get_timestamp_str()}] VLC: {old_name} -> {new_name}")
-                self._last_polled_state = state_val
+            if state != self._last_polled_state:
+                from .utils import get_timestamp_str
+                print(f"[{get_timestamp_str()}] VLC: {self._last_polled_state.name} -> {state.name}")
+                self._last_polled_state = state
                 
-            return int(state_val)
+            return state
         except:
-            return 7 # Error
-
-    def get_state_name(self, state_value):
-        """Maps VLC state integer to a human-readable string."""
-        mapping = {
-            0: "NothingSpecial",
-            1: "Opening",
-            2: "Buffering",
-            3: "Playing",
-            4: "Paused",
-            5: "Stopped",
-            6: "Ended",
-            7: "Error"
-        }
-        return mapping.get(state_value, f"Unknown({state_value})")
+            return PlayerState.ERROR
 
     def is_playing(self):
         if not self.player:

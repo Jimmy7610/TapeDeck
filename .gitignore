@@ -19,3 +19,7 @@ bin/ffmpeg.exe
 # OS
 Thumbs.db
 .DS_Store
+
+# Debug/Test scripts
+debug_vlc.py
+finalize_verification.py

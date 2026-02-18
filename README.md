@@ -2,7 +2,7 @@
 
 TapeDeck is a premium radio player and recorder application built with Python and PySide6. It features a modern, responsive console-style interface and provides high-quality streaming and recording capabilities.
 
-![TapeDeck UI](assets/screenshots/wide.png)
+
 
 ## Features
 
